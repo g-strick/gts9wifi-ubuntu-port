@@ -1,0 +1,87 @@
+name: Galaxy Tab S9 kernel baseline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04-arm
+    # Trixie supplies the Clang 19 and pahole 1.30 used by build #8.
+    container: debian:trixie-slim
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    env:
+      FEDORA_COMMIT: 152cbfe2cc25cf47c7edc7a62fbc7ff5d35f764c
+      LINUX_TAG: v7.2
+      LINUX_COMMIT: 8d3ae59288f1e7d58d76558a6ee96d533bc5019f
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            bc bison build-essential ca-certificates clang-19 cpio flex git kmod \
+            libelf-dev libssl-dev lld-19 llvm-19 pahole patch pkg-config python3 \
+            zlib1g-dev zstd
+          apt-get clean
+          echo /usr/lib/llvm-19/bin >> "$GITHUB_PATH"
+
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Fetch pinned kernel inputs
+        run: |
+          test "$(uname -m)" = aarch64
+          df -h "$RUNNER_TEMP"
+          git clone --bare --depth 1 --branch "$LINUX_TAG" \
+            https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git \
+            "$RUNNER_TEMP/linux.git"
+          git init --bare "$RUNNER_TEMP/fedora.git"
+          git -C "$RUNNER_TEMP/fedora.git" fetch --depth 1 \
+            https://github.com/C-neon/gts9wifi-fedora-linux.git "$FEDORA_COMMIT"
+          mkdir "$RUNNER_TEMP/fedora-ref"
+          git -C "$RUNNER_TEMP/fedora.git" archive "$FEDORA_COMMIT" kernel | \
+            tar -x -C "$RUNNER_TEMP/fedora-ref"
+
+      - name: Build X710 kernel and modules
+        run: |
+          export KERNEL_GIT="$RUNNER_TEMP/linux.git"
+          export FEDORA_REF="$RUNNER_TEMP/fedora-ref"
+          export KERNEL_WORKDIR="$RUNNER_TEMP/gts9wifi-kernel"
+          comparison="$RUNNER_TEMP/gts9wifi-comparison"
+          mkdir "$comparison"
+          {
+            printf 'Ubuntu port %s\nFedora recipe %s\nLinux %s %s\n' \
+              "$(git rev-parse HEAD)" "$FEDORA_COMMIT" "$LINUX_TAG" "$LINUX_COMMIT"
+            clang --version
+            ld.lld --version
+            pahole --version
+            dpkg-query -W clang-19 lld-19 llvm-19 pahole
+          } | tee "$comparison/build-inputs.txt"
+          df -h "$RUNNER_TEMP"
+          bash scripts/build-gts9wifi-kernel.sh
+
+          cp "$KERNEL_WORKDIR"/out/{config,sm8550-samsung-gts9wifi.dtb,kernel.release} \
+            "$comparison/"
+          cd "$comparison"
+          sha256sum config sm8550-samsung-gts9wifi.dtb kernel.release build-inputs.txt > SHA256SUMS
+
+      - name: Upload baseline comparison files
+        uses: actions/upload-artifact@v4
+        with:
+          name: gts9wifi-baseline-${{ github.sha }}
+          path: ${{ runner.temp }}/gts9wifi-comparison/
+          if-no-files-found: error
+
+      - name: Upload failed build logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gts9wifi-baseline-logs-${{ github.sha }}
+          path: ${{ runner.temp }}/gts9wifi-kernel/*.log
+          if-no-files-found: ignore
