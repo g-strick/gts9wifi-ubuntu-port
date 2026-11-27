@@ -17,13 +17,32 @@ Place the inputs next to this repository (the scripts default to its parent
 directory; override with `GTS9WIFI_ROOT`):
 
 ```sh
-git clone https://github.com/nacht20-de/gts9wifi-fedora-linux fedora-ref
+git clone https://github.com/C-neon/gts9wifi-fedora-linux fedora-ref
+git -C fedora-ref checkout --detach 152cbfe2cc25cf47c7edc7a62fbc7ff5d35f764c
 git clone --depth 1 --branch v7.2 \
     https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git build/linux-mainline
 ```
 
 The kernel build checks that `v7.2` resolves to
 `8d3ae59288f1e7d58d76558a6ee96d533bc5019f`.
+
+## Kernel build on GitHub Actions
+
+In your fork, open **Actions → Galaxy Tab S9 kernel → Run workflow** and select
+the branch containing the changes. The job uses the `ubuntu-24.04-arm`
+runner with a Debian trixie container for Clang 19 and pahole 1.30. It builds
+the X710 kernel and matching modules from the pinned C-neon Fedora recipe and
+Linux v7.2.
+
+Download `gts9wifi-kernel-<commit>` and run `sha256sum -c SHA256SUMS` from the
+extracted directory (`shasum -a 256 -c SHA256SUMS` on macOS). It contains
+`Image.gz`, the X710 DTB and `modules-<release>.tar.gz` from the same build.
+`config`, `kernel.release`, `build-inputs.txt`, `Module.symvers` and the public
+`signing_key.x509` certificate record the build identity. A failed run can
+upload patch, config and build logs as `gts9wifi-kernel-logs-<commit>`.
+
+Use the verified kernel and DTB as input to the bundle step below. Generate the
+initramfs with the matching modules before packaging `vendor_boot`.
 
 ## Device firmware
 
@@ -130,7 +149,8 @@ The live install keeps the previous module tree as
 **Kernel.** Exports a pristine tree from the `v7.2` tag, runs the Fedora
 port's `kernel/prepare.sh` (its 19 patches, the out-of-tree X710 drivers —
 ANA38407 panel, FTS1BA90A touch, WEZ01 S Pen, SM5714/SM5440 charging, PS5169,
-HI1337/DW9808 camera, EL721, K250A, SPU — and the board DTS), merges
+HI1337/DW9808 camera, EL721, K250A, SPU — and the board DTS), applies the
+Ubuntu patch queue, registers the STM32 pogo input driver, merges
 `kernel/config/config-gts9wifi-ubuntu.fragment` (AppArmor, squashfs/snap,
 overlayfs, netfilter), builds, and refuses to finish if any X710 driver is
 missing from the result.

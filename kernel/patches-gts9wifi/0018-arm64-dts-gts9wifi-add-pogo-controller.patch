@@ -1,0 +1,80 @@
+--- a/arch/arm64/boot/dts/qcom/sm8550-samsung-gts9wifi.dts
++++ b/arch/arm64/boot/dts/qcom/sm8550-samsung-gts9wifi.dts
+@@ -158,6 +158,16 @@
+ 		regulator-always-on;
+ 		regulator-boot-on;
+ 	};
++
++	pogo_vddo: regulator-pogo-vddo {
++		compatible = "regulator-fixed";
++		regulator-name = "pogo_vddo";
++		gpio = <&tlmm 10 GPIO_ACTIVE_HIGH>;
++		enable-active-high;
++		regulator-boot-on;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pogo_vddo_en>;
++	};
+ 
+ 	wcn6855_pmu: wcn6855-pmu {
+ 		compatible = "qcom,wcn6855-pmu";
+@@ -803,6 +813,37 @@
+ 		input-enable;
+ 		bias-disable;
+ 	};
++
++	pogo_vddo_en: pogo-vddo-en-state {
++		pins = "gpio10";
++		function = "gpio";
++		bias-disable;
++		output-high;
++	};
++
++	pogo_control: pogo-control-state {
++		swclk-pins {
++			pins = "gpio12";
++			function = "gpio";
++			bias-disable;
++			output-low;
++		};
++
++		reset-pins {
++			pins = "gpio13";
++			function = "gpio";
++			bias-disable;
++			output-high;
++		};
++	};
++
++	pogo_irqs: pogo-irqs-state {
++		pins = "gpio62", "gpio75";
++		function = "gpio";
++		drive-strength = <2>;
++		input-enable;
++		bias-disable;
++	};
+ 
+ 	/* Panel tear-effect (TE) line routed to the MDP vsync input. */
+ 	sde_te: sde-te-state {
+@@ -1325,6 +1366,22 @@
+ 		};
+ 	};
+ };
++
++&i2c15 {
++	clock-frequency = <100000>;
++	status = "okay";
++
++	keyboard@2a {
++		compatible = "samsung,gts9wifi-stm32-pogo";
++		reg = <0x2a>;
++		vddo-supply = <&pogo_vddo>;
++		reset-gpios = <&tlmm 13 GPIO_ACTIVE_LOW>;
++		connected-gpios = <&tlmm 62 GPIO_ACTIVE_HIGH>;
++		data-ready-gpios = <&tlmm 75 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&pogo_control>, <&pogo_irqs>;
++	};
++};
+ 
+ &uart7 {
+ 	status = "okay";

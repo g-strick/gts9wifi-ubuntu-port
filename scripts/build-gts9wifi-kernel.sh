@@ -1,5 +1,5 @@
 #!/bin/bash
-# Build the gts9wifi (SM-X710) baseline kernel.
+# Build the gts9wifi (SM-X710) kernel.
 #
 # Baseline = the kernel recipe that is known to boot this tablet: the Fedora
 # gts9wifi port's prepare.sh (its patches, out-of-tree X710 drivers and board
@@ -58,6 +58,20 @@ for p in "$repo"/kernel/patches-gts9wifi/*.patch; do
 		echo "patch failed: $p" >&2; exit 1; }
 done
 
+keyboard_dir=$tree/drivers/input/keyboard
+install -m 0644 "$repo/kernel/drivers/samsung_stm32_pogo.c" "$keyboard_dir/"
+cat >> "$keyboard_dir/Kconfig" <<'EOF'
+
+config KEYBOARD_SAMSUNG_STM32_POGO
+	tristate "Samsung Galaxy Tab S9 STM32 pogo keyboard"
+	depends on INPUT_KEYBOARD && I2C && GPIOLIB && REGULATOR
+	help
+	  Support Samsung Book Cover Keyboards through the tablet's STM32
+	  pogo-pin controller.
+EOF
+printf 'obj-$(CONFIG_KEYBOARD_SAMSUNG_STM32_POGO) += samsung_stm32_pogo.o\n' \
+	>> "$keyboard_dir/Makefile"
+
 echo "== 3/5 Ubuntu userspace fragment"
 cd "$tree"
 scripts/kconfig/merge_config.sh -m .config \
@@ -67,6 +81,8 @@ for sym in DRM_PANEL_SAMSUNG_ANA38407 TOUCHSCREEN_FTS1BA90A TOUCHSCREEN_WACOM_WE
 	BATTERY_SM5714 TYPEC_SM5714 ATH11K_PCI SECURITY_APPARMOR SQUASHFS; do
 	grep -qE "^CONFIG_$sym=[ym]" .config || { echo "CONFIG_$sym is not enabled" >&2; exit 1; }
 done
+grep -qx 'CONFIG_KEYBOARD_SAMSUNG_STM32_POGO=y' .config || {
+	echo 'CONFIG_KEYBOARD_SAMSUNG_STM32_POGO must be built in' >&2; exit 1; }
 
 echo "== 4/5 Image.gz, dtbs, modules (-j$jobs)"
 make ARCH=arm64 LLVM=1 -j"$jobs" Image.gz dtbs modules > "$work/build.log" 2>&1 || {
@@ -86,7 +102,7 @@ echo "$krel" > "$out/kernel.release"
 # The X710 drivers must be present, built in or as modules.
 # grep -c reads the whole stream: grep -q would exit early, SIGPIPE zcat and,
 # under pipefail, report a present driver as missing.
-for drv in ana38407 fts1ba90a wez01 sm5714; do
+for drv in ana38407 fts1ba90a wez01 sm5714 samsung-gts9u-stm32-pogo; do
 	in_image=$(zcat "$out/Image.gz" | grep -ac "$drv" || true)
 	as_module=$(find "$out/modules-root" -name "*${drv}*.ko*" | wc -l)
 	if [ "${in_image:-0}" -eq 0 ] && [ "$as_module" -eq 0 ]; then

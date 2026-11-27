@@ -27,6 +27,7 @@
 #include <linux/pm_wakeup.h>
 #include <linux/property.h>
 #include <linux/regulator/consumer.h>
+#include <linux/sysfs.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 
@@ -77,7 +78,24 @@ module_param_named(connection_wakeup, pogo_connection_wakeup, bool, 0644);
 MODULE_PARM_DESC(connection_wakeup,
 		 "allow the pogo connection GPIO to wake the system");
 
+struct samsung_pogo_variant {
+	const char *model_d1_name;
+	bool has_booster;
+	bool allow_bootloader;
+};
+
+static const struct samsung_pogo_variant samsung_pogo_x910 = {
+	.model_d1_name = "Book Cover Keyboard (EF-DX900)",
+	.has_booster = true,
+	.allow_bootloader = true,
+};
+
+static const struct samsung_pogo_variant samsung_pogo_x710 = {
+	.model_d1_name = "Book Cover Keyboard with AI Key (EF-DX725)",
+};
+
 struct samsung_pogo {
+	const struct samsung_pogo_variant *variant;
 	struct i2c_client *client;
 	struct i2c_client *booster;
 	struct regulator *vddo;
@@ -128,11 +146,13 @@ static void samsung_pogo_set_data_irq(struct samsung_pogo *pogo, bool enable);
 static void samsung_pogo_release_keys(struct samsung_pogo *pogo);
 static void samsung_pogo_release_touchpad(struct samsung_pogo *pogo);
 
-static const char *samsung_pogo_model_name(u8 protocol_model,
-					   const u8 version[4])
+static const char *samsung_pogo_model_name(const struct samsung_pogo *pogo)
 {
-	/* Mirror stm32_read_version() from Samsung's X910 source. */
-	if (protocol_model == 0xd1 || protocol_model == 0xd2)
+	u8 protocol_model = pogo->model;
+
+	if (protocol_model == 0xd1)
+		return pogo->variant->model_d1_name;
+	if (protocol_model == 0xd2)
 		return "Book Cover Keyboard (EF-DX900)";
 	if (protocol_model == 0x03 || protocol_model == POGO_MODEL_EF_DX925 ||
 	    protocol_model == 0xd5)
@@ -140,7 +160,7 @@ static const char *samsung_pogo_model_name(u8 protocol_model,
 	if (protocol_model == POGO_MODEL_EF_DX920)
 		return "Book Cover Keyboard Slim with AI Key (EF-DX920)";
 
-	switch (version[1]) {
+	switch (pogo->app_version[1]) {
 	case 0:
 		return "Book Cover Keyboard (EF-DX915)";
 	case 1:
@@ -214,7 +234,8 @@ static void samsung_pogo_start_application(struct samsung_pogo *pogo)
 static void samsung_pogo_reset_application(struct samsung_pogo *pogo)
 {
 	/* Samsung resets the application after an exhausted runtime I2C retry. */
-	gpiod_set_value_cansleep(pogo->boot, 0);
+	if (pogo->boot)
+		gpiod_set_value_cansleep(pogo->boot, 0);
 	gpiod_set_value_cansleep(pogo->reset, 1);
 	usleep_range(3000, 4000);
 	gpiod_set_value_cansleep(pogo->reset, 0);
@@ -592,20 +613,22 @@ static int samsung_pogo_enable_power(struct samsung_pogo *pogo)
 		goto out_unlock;
 	pogo->powered = true;
 
-	/* Exact order and values used by Samsung before accepting STM32 data. */
-	ret = samsung_pogo_booster_write(pogo, MAX77816_CONFIG2,
-					 MAX77816_OUTPUT_ENABLE);
-	if (!ret)
-		ret = samsung_pogo_booster_write(pogo, MAX77816_CONFIG1,
-					     MAX77816_LIMIT_3P1A);
-	if (ret) {
-		samsung_pogo_power_off_locked(pogo);
-		goto out_unlock;
-	}
+	/* Program the X910 booster before accepting STM32 data. */
+	if (pogo->booster) {
+		ret = samsung_pogo_booster_write(pogo, MAX77816_CONFIG2,
+						 MAX77816_OUTPUT_ENABLE);
+		if (!ret)
+			ret = samsung_pogo_booster_write(pogo, MAX77816_CONFIG1,
+						 MAX77816_LIMIT_3P1A);
+		if (ret) {
+			samsung_pogo_power_off_locked(pogo);
+			goto out_unlock;
+		}
 
-	dev_info(&pogo->client->dev,
-		 "MAX77816 output enabled (config2=%#x, config1=%#x)\n",
-		 MAX77816_OUTPUT_ENABLE, MAX77816_LIMIT_3P1A);
+		dev_info(&pogo->client->dev,
+			 "MAX77816 output enabled (config2=%#x, config1=%#x)\n",
+			 MAX77816_OUTPUT_ENABLE, MAX77816_LIMIT_3P1A);
+	}
 out_unlock:
 	mutex_unlock(&pogo->power_lock);
 	return ret;
@@ -1064,8 +1087,7 @@ static int samsung_pogo_read_event(struct samsung_pogo *pogo)
 					 "immediate version read failed: %d\n", ret);
 				return 0;
 			}
-			model_name = samsung_pogo_model_name(pogo->model,
-							    pogo->app_version);
+			model_name = samsung_pogo_model_name(pogo);
 			if (!model_name) {
 				dev_warn(&pogo->client->dev,
 					 "unsupported keyboard model %#02x, version %*ph\n",
@@ -1358,13 +1380,43 @@ static ssize_t event_poll_store(struct device *dev,
 }
 static DEVICE_ATTR_WO(event_poll);
 
+static struct attribute *samsung_pogo_attrs[] = {
+	&dev_attr_diagnostics.attr,
+	&dev_attr_event_poll.attr,
+	&dev_attr_firmware_update.attr,
+	NULL,
+};
+
+static umode_t samsung_pogo_attr_visible(struct kobject *kobj,
+					 struct attribute *attr, int index)
+{
+	struct samsung_pogo *pogo = dev_get_drvdata(kobj_to_dev(kobj));
+
+	if (attr == &dev_attr_firmware_update.attr && !pogo->variant->allow_bootloader)
+		return 0;
+
+	return attr->mode;
+}
+
+static const struct attribute_group samsung_pogo_group = {
+	.attrs = samsung_pogo_attrs,
+	.is_visible = samsung_pogo_attr_visible,
+};
+
+static const struct attribute_group *samsung_pogo_groups[] = {
+	&samsung_pogo_group,
+	NULL,
+};
+
 static int samsung_pogo_probe(struct i2c_client *client)
 {
 	struct device *dev = &client->dev;
-	struct device_node *booster_np;
+	const struct samsung_pogo_variant *variant = device_get_match_data(dev);
 	struct samsung_pogo *pogo;
 	int ret;
 
+	if (!variant)
+		return -ENODEV;
 	if (!i2c_check_functionality(client->adapter, I2C_FUNC_I2C))
 		return -EOPNOTSUPP;
 
@@ -1372,6 +1424,7 @@ static int samsung_pogo_probe(struct i2c_client *client)
 	if (!pogo)
 		return -ENOMEM;
 
+	pogo->variant = variant;
 	pogo->client = client;
 	pogo->caps_request = 1;
 	atomic_set(&pogo->caps_on_defer_header, 0);
@@ -1396,31 +1449,40 @@ static int samsung_pogo_probe(struct i2c_client *client)
 	if (ret)
 		return ret;
 
-	booster_np = of_parse_phandle(dev->of_node, "booster", 0);
-	if (!booster_np)
-		return dev_err_probe(dev, -EINVAL, "missing MAX77816 phandle\n");
-	pogo->booster = of_find_i2c_device_by_node(booster_np);
-	of_node_put(booster_np);
-	if (!pogo->booster)
-		return dev_err_probe(dev, -EPROBE_DEFER, "MAX77816 is not ready\n");
-	ret = devm_add_action_or_reset(dev, samsung_pogo_put_booster,
-				       &pogo->booster->dev);
-	if (ret)
-		return ret;
-	if (!i2c_check_functionality(pogo->booster->adapter, I2C_FUNC_I2C))
-		return dev_err_probe(dev, -EOPNOTSUPP,
-				     "MAX77816 adapter lacks raw I2C\n");
+	if (variant->has_booster) {
+		struct device_node *booster_np;
 
-	pogo->boot = devm_gpiod_get(dev, "boot", GPIOD_OUT_LOW);
-	if (IS_ERR(pogo->boot))
-		return dev_err_probe(dev, PTR_ERR(pogo->boot), "failed to get BOOT0\n");
+		booster_np = of_parse_phandle(dev->of_node, "booster", 0);
+		if (!booster_np)
+			return dev_err_probe(dev, -EINVAL, "missing MAX77816 phandle\n");
+		pogo->booster = of_find_i2c_device_by_node(booster_np);
+		of_node_put(booster_np);
+		if (!pogo->booster)
+			return dev_err_probe(dev, -EPROBE_DEFER,
+					     "MAX77816 is not ready\n");
+		ret = devm_add_action_or_reset(dev, samsung_pogo_put_booster,
+					       &pogo->booster->dev);
+		if (ret)
+			return ret;
+		if (!i2c_check_functionality(pogo->booster->adapter, I2C_FUNC_I2C))
+			return dev_err_probe(dev, -EOPNOTSUPP,
+					     "MAX77816 adapter lacks raw I2C\n");
+	}
+
+	/* The X710 leaves SWCLK low in pinctrl and uses the application only. */
+	if (variant->allow_bootloader) {
+		pogo->boot = devm_gpiod_get(dev, "boot", GPIOD_OUT_LOW);
+		if (IS_ERR(pogo->boot))
+			return dev_err_probe(dev, PTR_ERR(pogo->boot), "failed to get BOOT0\n");
+	}
 
 	/* reset is active-low in DT; logical low means deasserted/high on the pin. */
 	pogo->reset = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
 	if (IS_ERR(pogo->reset))
 		return dev_err_probe(dev, PTR_ERR(pogo->reset), "failed to get reset\n");
 
-	samsung_pogo_probe_bootloader(pogo);
+	if (variant->allow_bootloader)
+		samsung_pogo_probe_bootloader(pogo);
 
 	pogo->data_ready = devm_gpiod_get(dev, "data-ready", GPIOD_IN);
 	if (IS_ERR(pogo->data_ready))
@@ -1478,18 +1540,6 @@ static int samsung_pogo_probe(struct i2c_client *client)
 			pogo->wake_enabled = true;
 		}
 	}
-	ret = device_create_file(dev, &dev_attr_firmware_update);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to create firmware update control\n");
-	ret = device_create_file(dev, &dev_attr_diagnostics);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to create diagnostics\n");
-	ret = device_create_file(dev, &dev_attr_event_poll);
-	if (ret)
-		return dev_err_probe(dev, ret,
-				     "failed to create event poll control\n");
 	dev_info(dev, "STM32 pogo controller ready (connected=%d, data-ready=%d)\n",
 		 gpiod_get_value_cansleep(pogo->connected),
 		 gpiod_get_value_cansleep(pogo->data_ready));
@@ -1504,14 +1554,12 @@ static void samsung_pogo_remove(struct i2c_client *client)
 {
 	struct samsung_pogo *pogo = i2c_get_clientdata(client);
 
-	device_remove_file(&client->dev, &dev_attr_firmware_update);
-	device_remove_file(&client->dev, &dev_attr_diagnostics);
-	device_remove_file(&client->dev, &dev_attr_event_poll);
+	disable_irq(pogo->connection_irq);
 	cancel_delayed_work_sync(&pogo->connection_work);
-	cancel_delayed_work_sync(&pogo->application_work);
 	if (pogo->wake_enabled)
 		disable_irq_wake(pogo->connection_irq);
 	samsung_pogo_set_data_irq(pogo, false);
+	cancel_delayed_work_sync(&pogo->application_work);
 	mutex_lock(&pogo->lock);
 	samsung_pogo_unregister_input(pogo);
 	samsung_pogo_power_off(pogo);
@@ -1520,7 +1568,8 @@ static void samsung_pogo_remove(struct i2c_client *client)
 }
 
 static const struct of_device_id samsung_pogo_of_match[] = {
-	{ .compatible = "samsung,gts9u-stm32-pogo" },
+	{ .compatible = "samsung,gts9u-stm32-pogo", .data = &samsung_pogo_x910 },
+	{ .compatible = "samsung,gts9wifi-stm32-pogo", .data = &samsung_pogo_x710 },
 	{ }
 };
 MODULE_DEVICE_TABLE(of, samsung_pogo_of_match);
@@ -1529,12 +1578,13 @@ static struct i2c_driver samsung_pogo_driver = {
 	.driver = {
 		.name = "samsung-gts9u-stm32-pogo",
 		.of_match_table = samsung_pogo_of_match,
+		.dev_groups = samsung_pogo_groups,
 	},
 	.probe = samsung_pogo_probe,
 	.remove = samsung_pogo_remove,
 };
 module_i2c_driver(samsung_pogo_driver);
 
-MODULE_DESCRIPTION("Samsung SM-X910 STM32 pogo keyboard controller");
+MODULE_DESCRIPTION("Samsung Galaxy Tab S9 STM32 pogo keyboard controller");
 MODULE_AUTHOR("Samsung Electronics; mainline adaptation by the gts9uwifi port");
 MODULE_LICENSE("GPL");

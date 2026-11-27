@@ -170,3 +170,32 @@ were kept untouched.
   load. Rule from now on: **a new kernel image always ships with the modules
   rebuilt from the same tree**, installed in the rootfs and the initramfs.
   Modules rebuilt; to be installed on the tablet over the USB network.
+
+## 2026-11-26 — Manual X710 baseline build workflow
+
+The v0.5.0 build #8 config and board DTB lack pogo integration. The exact
+Fedora input for that build is unknown. Added a local manual ARM64 workflow
+using the existing kernel build script with Linux v7.2 and the pre-pogo Fedora
+stable rebase `152cbfe2cc25cf47c7edc7a62fbc7ff5d35f764c`. The workflow records
+source revisions and tool versions and collects the config and board DTB for
+comparison. It uses Debian trixie for Clang 19 and pahole 1.30, the versions
+recorded in build #8's config. The Ubuntu X710 build script, config fragment
+and patch queue match the v0.5.0 revision.
+
+YAML parsing, Bash syntax and shallow local export of the pinned Fedora recipe
+passed. The first hosted run exposed a malformed patch 0016. After correction,
+the build at `195c6f5` produced a DTB byte-identical to build #8. The resolved
+config differed only in compiler probe values for the disabled Rust support.
+
+## 2026-11-27 — X710 pogo keyboard build candidate
+
+Patch 0018 enables GENI I²C SE15 and describes the X710 STM32 controller at
+`0x2a`, with GPIO10 VDDO and stock GPIO defaults. The built-in mainline driver
+uses application mode on X710 and maps protocol `0xd1` to EF-DX725. The driver
+keeps the MAX77816 and ROM firmware path specific to the X910 match.
+
+The patched DTS compiled against Linux v7.2 and the driver compiled to an
+ARM64 object against the pinned headers. The touchpad packet test passed.
+The [GitHub Actions job](BUILDING.md#kernel-build-on-github-actions) now
+collects the kernel, DTB and matching signed modules with SHA-256 hashes.
+The full candidate build and tablet validation remain pending.

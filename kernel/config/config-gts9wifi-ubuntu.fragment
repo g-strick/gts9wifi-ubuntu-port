@@ -138,3 +138,6 @@ CONFIG_INTERCONNECT_QCOM_OSM_L3=y
 # iterated on a running tablet; it is only needed once the root filesystem
 # is up (GDM), and udev loads it from the DT compatible.
 CONFIG_TOUCHSCREEN_FTS1BA90A=m
+
+# STM32 controller for Samsung Book Cover Keyboards on the pogo pins.
+CONFIG_KEYBOARD_SAMSUNG_STM32_POGO=y

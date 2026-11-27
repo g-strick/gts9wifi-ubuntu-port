@@ -1,4 +1,4 @@
-name: Galaxy Tab S9 kernel baseline
+name: Galaxy Tab S9 kernel
 
 on:
   workflow_dispatch:
@@ -53,35 +53,42 @@ jobs:
           export KERNEL_GIT="$RUNNER_TEMP/linux.git"
           export FEDORA_REF="$RUNNER_TEMP/fedora-ref"
           export KERNEL_WORKDIR="$RUNNER_TEMP/gts9wifi-kernel"
-          comparison="$RUNNER_TEMP/gts9wifi-comparison"
-          mkdir "$comparison"
+          artifact="$RUNNER_TEMP/gts9wifi-artifact"
+          mkdir "$artifact"
           {
             printf 'Ubuntu port %s\nFedora recipe %s\nLinux %s %s\n' \
-              "$(git rev-parse HEAD)" "$FEDORA_COMMIT" "$LINUX_TAG" "$LINUX_COMMIT"
+              "$GITHUB_SHA" "$FEDORA_COMMIT" "$LINUX_TAG" "$LINUX_COMMIT"
             clang --version
             ld.lld --version
             pahole --version
             dpkg-query -W clang-19 lld-19 llvm-19 pahole
-          } | tee "$comparison/build-inputs.txt"
+          } | tee "$artifact/build-inputs.txt"
           df -h "$RUNNER_TEMP"
           bash scripts/build-gts9wifi-kernel.sh
 
-          cp "$KERNEL_WORKDIR"/out/{config,sm8550-samsung-gts9wifi.dtb,kernel.release} \
-            "$comparison/"
-          cd "$comparison"
-          sha256sum config sm8550-samsung-gts9wifi.dtb kernel.release build-inputs.txt > SHA256SUMS
+          out="$KERNEL_WORKDIR/out"
+          cp "$out"/{Image.gz,config,sm8550-samsung-gts9wifi.dtb,kernel.release} "$artifact/"
+          cp "$KERNEL_WORKDIR/linux-src/Module.symvers" \
+            "$KERNEL_WORKDIR/linux-src/certs/signing_key.x509" "$artifact/"
+          krel=$(cat "$out/kernel.release")
+          modules="modules-$krel.tar.gz"
+          tar -C "$out/modules-root/lib/modules" -czf "$artifact/$modules" "$krel"
+          cd "$artifact"
+          sha256sum Image.gz config sm8550-samsung-gts9wifi.dtb kernel.release \
+            build-inputs.txt Module.symvers signing_key.x509 "$modules" > SHA256SUMS
 
-      - name: Upload baseline comparison files
+      - name: Upload kernel, board DTB and matching modules
         uses: actions/upload-artifact@v4
         with:
-          name: gts9wifi-baseline-${{ github.sha }}
-          path: ${{ runner.temp }}/gts9wifi-comparison/
+          name: gts9wifi-kernel-${{ github.sha }}
+          path: ${{ runner.temp }}/gts9wifi-artifact/
+          compression-level: 0
           if-no-files-found: error
 
       - name: Upload failed build logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: gts9wifi-baseline-logs-${{ github.sha }}
+          name: gts9wifi-kernel-logs-${{ github.sha }}
           path: ${{ runner.temp }}/gts9wifi-kernel/*.log
           if-no-files-found: ignore
